@@ -9,3 +9,4 @@ resolver = "2"
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
+bincode = "1"

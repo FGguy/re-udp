@@ -13,10 +13,10 @@ pub struct Args {
     pub ip_addr: String,
 
     /// Name of the file to retrieve
-    #[arg(short, long, required = true)]
-    pub name: String,
+    #[arg(short, long = "file-name", required = true)]
+    pub file_name: String,
 
     /// Size of the payload in bytes
     #[arg(short, long = "segment-size", default_value_t = 512)]
-    pub segment_size: u64
+    pub segment_size: u32,
 }

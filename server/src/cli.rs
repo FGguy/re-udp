@@ -10,5 +10,5 @@ pub struct Args {
 
     /// Folder which contains the files this server can serve
     #[arg(short, long = "file-directory", default_value_t = String::from("/"))]
-    pub file_directory: String
+    pub file_directory: String,
 }

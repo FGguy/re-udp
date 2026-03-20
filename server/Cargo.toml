@@ -7,3 +7,4 @@ edition = "2024"
 shared = { path = "../shared" }
 clap = { workspace = true }
 serde = { workspace = true }
+bincode = { workspace = true }
