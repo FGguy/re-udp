@@ -6,7 +6,7 @@ use rand::Rng;
 use shared::{MessageType, ReUDPPacket, RequestPayload};
 
 enum ClientState {
-    Request,
+    Requesting,
     Receiving,
 }
 
@@ -45,7 +45,7 @@ impl Client {
     pub fn run(&mut self) -> Result<(), Box<dyn error::Error>> {
         loop {
             match self.state {
-                ClientState::Request => {
+                ClientState::Requesting => {
                     self.socket
                         .connect(format!("{}:9090", self.server_ip_addr))?;
 
