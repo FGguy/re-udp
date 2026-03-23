@@ -6,7 +6,6 @@ pub enum MessageType {
     Data,
     Ack,
     Error,
-    End,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

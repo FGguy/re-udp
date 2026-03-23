@@ -12,7 +12,7 @@ fn main() {
     let socket = UdpSocket::bind(&ip_addr)
         .unwrap_or_else(|e| panic!("Failed to bind UDP socket to: {}, error: {}", &ip_addr, e));
 
-    let mut client = client::Client::new(socket, args.file_name, args.segment_size, args.ip_addr);
+    let mut client = client::Client::new(socket, args.file_name, args.segment_size, args.ip_addr, args.server_port);
     if let Err(e) = client.run() {
         panic!("Client error: {}", e)
     }

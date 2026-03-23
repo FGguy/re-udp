@@ -1,10 +1,15 @@
 use std::error;
 use std::fs;
+use std::io;
 use std::net;
+use std::time::Duration;
 
 use rand::Rng;
 
 use shared::{MessageType, ReUDPPacket, RequestPayload};
+
+const REQUEST_TIMEOUT_MS: u64 = 500;
+const MAX_REQUEST_RETRIES: u32 = 10;
 
 enum ClientState {
     Requesting,
@@ -23,8 +28,10 @@ pub struct Client {
     file_name: String,
     segment_size: u32,
     server_ip_addr: String,
+    server_port: u16,
     connection_id: u16,
     expected_seq: u8,
+    request_retries: u32,
 }
 
 impl Client {
@@ -33,6 +40,7 @@ impl Client {
         file_name: String,
         segment_size: u32,
         server_ip_addr: String,
+        server_port: u16,
     ) -> Client {
         Client {
             state: ClientState::Requesting,
@@ -42,8 +50,10 @@ impl Client {
             file_name,
             segment_size,
             server_ip_addr,
+            server_port,
             connection_id: 0,
             expected_seq: 0,
+            request_retries: 0,
         }
     }
 
@@ -52,7 +62,7 @@ impl Client {
             match self.state {
                 ClientState::Requesting => {
                     self.socket
-                        .connect(format!("{}:9090", self.server_ip_addr))?;
+                        .connect(format!("{}:{}", self.server_ip_addr, self.server_port))?;
 
                     let conn_id = rand::rng().random::<u16>();
                     self.connection_id = conn_id;
@@ -80,13 +90,49 @@ impl Client {
                     );
 
                     self.expected_seq = 0;
+                    self.request_retries = 0;
+                    self.socket
+                        .set_read_timeout(Some(Duration::from_millis(REQUEST_TIMEOUT_MS)))?;
                     self.state = ClientState::Receiving;
                 }
 
                 ClientState::Receiving => {
-                    let n = self.socket.recv(&mut self.receive_buffer)?;
+                    let n = match self.socket.recv(&mut self.receive_buffer) {
+                        Ok(n) => n,
+                        Err(ref e)
+                            if e.kind() == io::ErrorKind::WouldBlock
+                                || e.kind() == io::ErrorKind::TimedOut =>
+                        {
+                            // No response received — retransmit the REQUEST if we haven't
+                            // yet received any data for this transfer.
+                            if self.file_buffer.is_empty() && self.expected_seq == 0 {
+                                self.request_retries += 1;
+                                if self.request_retries > MAX_REQUEST_RETRIES {
+                                    return Err(format!(
+                                        "No response from server after {} retries",
+                                        MAX_REQUEST_RETRIES
+                                    )
+                                    .into());
+                                }
+                                println!(
+                                    "[client] Timeout waiting for response, retrying REQUEST (attempt {})",
+                                    self.request_retries
+                                );
+                                self.state = ClientState::Requesting;
+                            }
+                            continue;
+                        }
+                        Err(e) => return Err(Box::new(e)),
+                    };
+
                     let packet: ReUDPPacket =
-                        bincode::deserialize(&self.receive_buffer[..n])?;
+                        match bincode::deserialize(&self.receive_buffer[..n]) {
+                            Ok(p) => p,
+                            Err(_) => {
+                                eprintln!("[client] Malformed packet, ignoring");
+                                continue;
+                            }
+                        };
 
                     if packet.connection_id != self.connection_id {
                         println!(

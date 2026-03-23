@@ -17,7 +17,7 @@ enum ServerState {
         connection_id: u16,
         segments: Vec<Vec<u8>>,
         current_index: usize,
-        expected_seq: u8,
+        current_seq: u8,
         retransmit_count: u32,
     },
 }
@@ -142,7 +142,7 @@ impl Server {
                     connection_id: packet.connection_id,
                     segments,
                     current_index: 0,
-                    expected_seq: 0,
+                    current_seq: 0,
                     retransmit_count: 0,
                 })
             }
@@ -152,7 +152,7 @@ impl Server {
                 connection_id,
                 segments,
                 current_index,
-                expected_seq,
+                current_seq,
                 retransmit_count,
             } => {
                 let total = segments.len();
@@ -173,12 +173,12 @@ impl Server {
                         }
                         println!(
                             "[server] Timeout -- retransmitting DATA seq={} (attempt {})",
-                            expected_seq,
+                            current_seq,
                             retransmit_count + 1
                         );
                         let data_pkt = ReUDPPacket {
                             connection_id,
-                            sequence_number: expected_seq,
+                            sequence_number: current_seq,
                             message_type: MessageType::Data,
                             payload_length: current_seg.len(),
                             payload: current_seg,
@@ -192,7 +192,7 @@ impl Server {
                             connection_id,
                             segments,
                             current_index,
-                            expected_seq,
+                            current_seq,
                             retransmit_count: retransmit_count + 1,
                         })
                     }
@@ -207,7 +207,7 @@ impl Server {
                                 connection_id,
                                 segments,
                                 current_index,
-                                expected_seq,
+                                current_seq,
                                 retransmit_count,
                             });
                         }
@@ -221,7 +221,7 @@ impl Server {
                                         connection_id,
                                         segments,
                                         current_index,
-                                        expected_seq,
+                                        current_seq,
                                         retransmit_count,
                                     });
                                 }
@@ -235,20 +235,20 @@ impl Server {
                                 connection_id,
                                 segments,
                                 current_index,
-                                expected_seq,
+                                current_seq,
                                 retransmit_count,
                             });
                         }
 
-                        if pkt.sequence_number != expected_seq {
+                        if pkt.sequence_number != current_seq {
                             // Duplicate ACK for the previous packet — retransmit current DATA.
                             println!(
                                 "[server] Duplicate ACK seq={} (expected {}), retransmitting",
-                                pkt.sequence_number, expected_seq
+                                pkt.sequence_number, current_seq
                             );
                             let data_pkt = ReUDPPacket {
                                 connection_id,
-                                sequence_number: expected_seq,
+                                sequence_number: current_seq,
                                 message_type: MessageType::Data,
                                 payload_length: current_seg.len(),
                                 payload: current_seg,
@@ -261,13 +261,13 @@ impl Server {
                                 connection_id,
                                 segments,
                                 current_index,
-                                expected_seq,
+                                current_seq,
                                 retransmit_count,
                             });
                         }
 
                         // Correct ACK received.
-                        println!("[server] ACK seq={} OK", expected_seq);
+                        println!("[server] ACK seq={} OK", current_seq);
 
                         if is_final {
                             println!(
@@ -279,7 +279,7 @@ impl Server {
 
                         // Advance to the next segment.
                         let next_index = current_index + 1;
-                        let next_seq = expected_seq ^ 1;
+                        let next_seq = current_seq ^ 1;
                         let next_is_final = next_index == total - 1;
                         let next_seg = segments[next_index].clone();
                         let next_len = next_seg.len();
@@ -304,7 +304,7 @@ impl Server {
                             connection_id,
                             segments,
                             current_index: next_index,
-                            expected_seq: next_seq,
+                            current_seq: next_seq,
                             retransmit_count: 0,
                         })
                     }

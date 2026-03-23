@@ -19,4 +19,8 @@ pub struct Args {
     /// Size of the payload in bytes
     #[arg(short, long = "segment-size", default_value_t = 512)]
     pub segment_size: u32,
+
+    /// UDP port the server is listening on
+    #[arg(long = "server-port", default_value_t = 9090)]
+    pub server_port: u16,
 }
