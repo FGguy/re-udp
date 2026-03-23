@@ -12,6 +12,6 @@ fn main() {
     let socket = UdpSocket::bind(&ip_addr)
         .unwrap_or_else(|e| panic!("Failed to bind UDP socket to: {}, error: {}", &ip_addr, e));
 
-    let server = server::Server::new(socket);
+    let mut server = server::Server::new(socket, args.file_directory);
     server.run().unwrap();
 }
