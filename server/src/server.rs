@@ -29,6 +29,15 @@ enum ServerState {
         timeout_ms: u64,
         send_time: Instant,
     },
+    // After receiving the final ACK, linger briefly so we can re-send the
+    // final DATA packet if a duplicate ACK or duplicate REQUEST arrives
+    // (e.g. because the client's ACK was lost in transit).
+    Lingering {
+        client_addr: net::SocketAddr,
+        connection_id: u16,
+        final_packet_bytes: Vec<u8>,
+        deadline: Instant,
+    },
 }
 
 pub struct Server {
@@ -242,23 +251,23 @@ impl Server {
                             });
                         }
 
-                        let pkt: ReUDPPacket =
-                            match bincode::deserialize(&self.receive_buffer[..n]) {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    return Ok(ServerState::Sending {
-                                        client_addr,
-                                        connection_id,
-                                        segments,
-                                        current_index,
-                                        current_seq,
-                                        retransmit_count,
-                                        avg_rtt_ms,
-                                        timeout_ms,
-                                        send_time,
-                                    });
-                                }
-                            };
+                        let pkt: ReUDPPacket = match bincode::deserialize(&self.receive_buffer[..n])
+                        {
+                            Ok(p) => p,
+                            Err(_) => {
+                                return Ok(ServerState::Sending {
+                                    client_addr,
+                                    connection_id,
+                                    segments,
+                                    current_index,
+                                    current_seq,
+                                    retransmit_count,
+                                    avg_rtt_ms,
+                                    timeout_ms,
+                                    send_time,
+                                });
+                            }
+                        };
 
                         if pkt.connection_id != connection_id
                             || !matches!(pkt.message_type, MessageType::Ack)
@@ -320,16 +329,35 @@ impl Server {
                             );
                             (updated_avg, updated_timeout)
                         } else {
-                            println!("[server] ACK seq={} OK (after {} retransmit(s))", current_seq, retransmit_count);
+                            println!(
+                                "[server] ACK seq={} OK (after {} retransmit(s))",
+                                current_seq, retransmit_count
+                            );
                             (avg_rtt_ms, timeout_ms)
                         };
 
                         if is_final {
                             println!(
-                                "[server] Transfer complete for conn_id={}",
-                                connection_id
+                                "[server] Transfer complete for conn_id={}, lingering for {}ms",
+                                connection_id,
+                                (new_timeout_ms * 2).min(10_000)
                             );
-                            return Ok(ServerState::WaitingForConnection);
+                            let final_pkt = ReUDPPacket {
+                                connection_id,
+                                sequence_number: current_seq,
+                                message_type: MessageType::Data,
+                                payload_length: current_seg.len(),
+                                payload: current_seg,
+                                is_final: true,
+                            };
+                            let final_packet_bytes = bincode::serialize(&final_pkt)?;
+                            let linger_ms = (new_timeout_ms * 2).min(10_000);
+                            return Ok(ServerState::Lingering {
+                                client_addr,
+                                connection_id,
+                                final_packet_bytes,
+                                deadline: Instant::now() + Duration::from_millis(linger_ms),
+                            });
                         }
 
                         // Advance to the next segment.
@@ -367,6 +395,96 @@ impl Server {
                             avg_rtt_ms: new_avg_rtt_ms,
                             timeout_ms: new_timeout_ms,
                             send_time: Instant::now(),
+                        })
+                    }
+                }
+            }
+
+            ServerState::Lingering {
+                client_addr,
+                connection_id,
+                final_packet_bytes,
+                deadline,
+            } => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    println!(
+                        "[server] Linger window expired for conn_id={}",
+                        connection_id
+                    );
+                    return Ok(ServerState::WaitingForConnection);
+                }
+                self.socket.set_read_timeout(Some(remaining))?;
+
+                match self.socket.recv_from(&mut self.receive_buffer) {
+                    Err(ref e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        println!(
+                            "[server] Linger window expired for conn_id={}",
+                            connection_id
+                        );
+                        Ok(ServerState::WaitingForConnection)
+                    }
+
+                    Err(e) => Err(Box::new(e)),
+
+                    Ok((n, src)) => {
+                        if src != client_addr {
+                            return Ok(ServerState::Lingering {
+                                client_addr,
+                                connection_id,
+                                final_packet_bytes,
+                                deadline,
+                            });
+                        }
+
+                        let pkt: ReUDPPacket = match bincode::deserialize(&self.receive_buffer[..n])
+                        {
+                            Ok(p) => p,
+                            Err(_) => {
+                                return Ok(ServerState::Lingering {
+                                    client_addr,
+                                    connection_id,
+                                    final_packet_bytes,
+                                    deadline,
+                                });
+                            }
+                        };
+
+                        if pkt.connection_id != connection_id {
+                            return Ok(ServerState::Lingering {
+                                client_addr,
+                                connection_id,
+                                final_packet_bytes,
+                                deadline,
+                            });
+                        }
+
+                        match pkt.message_type {
+                            MessageType::Ack => {
+                                println!(
+                                    "[server] Duplicate ACK in linger state for conn_id={}, re-sending final DATA",
+                                    connection_id
+                                );
+                                self.socket.send_to(&final_packet_bytes, client_addr)?;
+                            }
+                            MessageType::Request => {
+                                println!(
+                                    "[server] Duplicate REQUEST in linger state for conn_id={}, re-sending final DATA",
+                                    connection_id
+                                );
+                                self.socket.send_to(&final_packet_bytes, client_addr)?;
+                            }
+                            _ => {}
+                        }
+
+                        Ok(ServerState::Lingering {
+                            client_addr,
+                            connection_id,
+                            final_packet_bytes,
+                            deadline,
                         })
                     }
                 }

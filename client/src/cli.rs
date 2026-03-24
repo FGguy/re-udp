@@ -9,7 +9,7 @@ pub struct Args {
     pub port: u16,
 
     /// IP address of the server from which the file is to be retrieved
-    #[arg(long = "ip-addr", default_value_t = String::from("127.0.0.1"))]
+    #[arg(long = "ip-addr", default_value_t = String::from("0.0.0.0"))]
     pub ip_addr: String,
 
     /// Name of the file to retrieve

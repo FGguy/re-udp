@@ -8,6 +8,7 @@ use rand::Rng;
 
 use shared::{MessageType, ReUDPPacket, RequestPayload};
 
+// Arbitrary timeout and retry limits for the client when waiting for a response to its REQUEST.
 const REQUEST_TIMEOUT_MS: u64 = 500;
 const MAX_REQUEST_RETRIES: u32 = 10;
 
@@ -61,12 +62,16 @@ impl Client {
         loop {
             match self.state {
                 ClientState::Requesting => {
+                    // "Connect" the UDP socket to the server
+                    // is used to not have to pass the server address to send() every time
                     self.socket
                         .connect(format!("{}:{}", self.server_ip_addr, self.server_port))?;
 
+                    // Generate random connection ID
                     let conn_id = rand::rng().random::<u16>();
                     self.connection_id = conn_id;
 
+                    // Create, serialize, and send REQUEST packet
                     let payload = RequestPayload {
                         file_name: self.file_name.clone(),
                         segment_size: self.segment_size,
@@ -93,6 +98,8 @@ impl Client {
                     self.request_retries = 0;
                     self.socket
                         .set_read_timeout(Some(Duration::from_millis(REQUEST_TIMEOUT_MS)))?;
+
+                    // Set state to Receiving so we can wait for the server's response (DATA or ERROR)
                     self.state = ClientState::Receiving;
                 }
 
@@ -103,7 +110,7 @@ impl Client {
                             if e.kind() == io::ErrorKind::WouldBlock
                                 || e.kind() == io::ErrorKind::TimedOut =>
                         {
-                            // No response received — retransmit the REQUEST if we haven't
+                            // No response received, retransmit the REQUEST if we haven't
                             // yet received any data for this transfer.
                             if self.file_buffer.is_empty() && self.expected_seq == 0 {
                                 self.request_retries += 1;
@@ -125,14 +132,14 @@ impl Client {
                         Err(e) => return Err(Box::new(e)),
                     };
 
-                    let packet: ReUDPPacket =
-                        match bincode::deserialize(&self.receive_buffer[..n]) {
-                            Ok(p) => p,
-                            Err(_) => {
-                                eprintln!("[client] Malformed packet, ignoring");
-                                continue;
-                            }
-                        };
+                    let packet: ReUDPPacket = match bincode::deserialize(&self.receive_buffer[..n])
+                    {
+                        Ok(p) => p,
+                        Err(_) => {
+                            eprintln!("[client] Malformed packet, ignoring");
+                            continue;
+                        }
+                    };
 
                     if packet.connection_id != self.connection_id {
                         println!(
@@ -149,7 +156,7 @@ impl Client {
 
                         MessageType::Data => {
                             if packet.sequence_number != self.expected_seq {
-                                // Duplicate or out-of-order DATA — re-ACK it so the server
+                                // Duplicate or out-of-order DATA, re-ACK it so the server
                                 // knows we already have this one and can move on.
                                 println!(
                                     "[client] Wrong seq={} (expected {}), re-ACKing seq={}",
@@ -171,9 +178,7 @@ impl Client {
 
                             println!(
                                 "[client] Received DATA seq={} ({} bytes) is_final={}",
-                                packet.sequence_number,
-                                packet.payload_length,
-                                packet.is_final
+                                packet.sequence_number, packet.payload_length, packet.is_final
                             );
 
                             self.file_buffer.extend_from_slice(&packet.payload);
