@@ -3,12 +3,14 @@ use std::fs;
 use std::io;
 use std::net;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shared::{MessageType, ReUDPPacket, RequestPayload};
 
-const ACK_TIMEOUT_MS: u64 = 500;
 const MAX_RETRANSMITS: u32 = 10;
+
+// Start with a reasonable default before we have any RTT samples.
+const INITIAL_TIMEOUT_MS: u64 = 500;
 
 enum ServerState {
     WaitingForConnection,
@@ -19,6 +21,13 @@ enum ServerState {
         current_index: usize,
         current_seq: u8,
         retransmit_count: u32,
+        // Adaptive timeout fields.
+        // avg_rtt_ms is a running EWMA of observed round-trip times.
+        // timeout_ms is what we actually pass to set_read_timeout; it gets
+        // doubled on each retransmit and recalculated after a clean ACK.
+        avg_rtt_ms: f64,
+        timeout_ms: u64,
+        send_time: Instant,
     },
 }
 
@@ -135,7 +144,7 @@ impl Server {
                 );
 
                 self.socket
-                    .set_read_timeout(Some(Duration::from_millis(ACK_TIMEOUT_MS)))?;
+                    .set_read_timeout(Some(Duration::from_millis(INITIAL_TIMEOUT_MS)))?;
 
                 Ok(ServerState::Sending {
                     client_addr: src,
@@ -144,6 +153,9 @@ impl Server {
                     current_index: 0,
                     current_seq: 0,
                     retransmit_count: 0,
+                    avg_rtt_ms: INITIAL_TIMEOUT_MS as f64 / 2.0,
+                    timeout_ms: INITIAL_TIMEOUT_MS,
+                    send_time: Instant::now(),
                 })
             }
 
@@ -154,6 +166,9 @@ impl Server {
                 current_index,
                 current_seq,
                 retransmit_count,
+                avg_rtt_ms,
+                timeout_ms,
+                send_time,
             } => {
                 let total = segments.len();
                 let is_final = current_index == total - 1;
@@ -171,11 +186,18 @@ impl Server {
                             );
                             return Ok(ServerState::WaitingForConnection);
                         }
+
+                        // Double the timeout on each retransmit (exponential backoff).
+                        let new_timeout_ms = (timeout_ms * 2).min(10_000);
                         println!(
-                            "[server] Timeout -- retransmitting DATA seq={} (attempt {})",
+                            "[server] Timeout -- retransmitting DATA seq={} (attempt {}), next timeout={}ms",
                             current_seq,
-                            retransmit_count + 1
+                            retransmit_count + 1,
+                            new_timeout_ms,
                         );
+                        self.socket
+                            .set_read_timeout(Some(Duration::from_millis(new_timeout_ms)))?;
+
                         let data_pkt = ReUDPPacket {
                             connection_id,
                             sequence_number: current_seq,
@@ -194,6 +216,11 @@ impl Server {
                             current_index,
                             current_seq,
                             retransmit_count: retransmit_count + 1,
+                            avg_rtt_ms,
+                            timeout_ms: new_timeout_ms,
+                            // Reset the send time so that if the retransmit eventually
+                            // gets ACKed we don't measure a wildly inflated RTT.
+                            send_time: Instant::now(),
                         })
                     }
 
@@ -209,6 +236,9 @@ impl Server {
                                 current_index,
                                 current_seq,
                                 retransmit_count,
+                                avg_rtt_ms,
+                                timeout_ms,
+                                send_time,
                             });
                         }
 
@@ -223,6 +253,9 @@ impl Server {
                                         current_index,
                                         current_seq,
                                         retransmit_count,
+                                        avg_rtt_ms,
+                                        timeout_ms,
+                                        send_time,
                                     });
                                 }
                             };
@@ -237,6 +270,9 @@ impl Server {
                                 current_index,
                                 current_seq,
                                 retransmit_count,
+                                avg_rtt_ms,
+                                timeout_ms,
+                                send_time,
                             });
                         }
 
@@ -263,11 +299,30 @@ impl Server {
                                 current_index,
                                 current_seq,
                                 retransmit_count,
+                                avg_rtt_ms,
+                                timeout_ms,
+                                send_time,
                             });
                         }
 
                         // Correct ACK received.
-                        println!("[server] ACK seq={} OK", current_seq);
+                        // Only update the RTT estimate when this was a clean (non-retransmitted)
+                        // send, otherwise the sample is ambiguous.
+                        let (new_avg_rtt_ms, new_timeout_ms) = if retransmit_count == 0 {
+                            let rtt_ms = send_time.elapsed().as_secs_f64() * 1_000.0;
+                            // Exponential moving average: weight new sample at 1/4.
+                            let updated_avg = 0.75 * avg_rtt_ms + 0.25 * rtt_ms;
+                            // Timeout = 2× the average RTT, clamped to a sensible range.
+                            let updated_timeout = ((updated_avg * 2.0) as u64).clamp(100, 10_000);
+                            println!(
+                                "[server] ACK seq={} OK  rtt={:.1}ms  avg_rtt={:.1}ms  timeout={}ms",
+                                current_seq, rtt_ms, updated_avg, updated_timeout
+                            );
+                            (updated_avg, updated_timeout)
+                        } else {
+                            println!("[server] ACK seq={} OK (after {} retransmit(s))", current_seq, retransmit_count);
+                            (avg_rtt_ms, timeout_ms)
+                        };
 
                         if is_final {
                             println!(
@@ -299,6 +354,9 @@ impl Server {
                             next_seq, next_len, next_is_final
                         );
 
+                        self.socket
+                            .set_read_timeout(Some(Duration::from_millis(new_timeout_ms)))?;
+
                         Ok(ServerState::Sending {
                             client_addr,
                             connection_id,
@@ -306,6 +364,9 @@ impl Server {
                             current_index: next_index,
                             current_seq: next_seq,
                             retransmit_count: 0,
+                            avg_rtt_ms: new_avg_rtt_ms,
+                            timeout_ms: new_timeout_ms,
+                            send_time: Instant::now(),
                         })
                     }
                 }
