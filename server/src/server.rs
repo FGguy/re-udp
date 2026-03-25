@@ -322,7 +322,7 @@ impl Server {
                             // Exponential moving average: weight new sample at 1/4.
                             let updated_avg = 0.75 * avg_rtt_ms + 0.25 * rtt_ms;
                             // Timeout = 2× the average RTT, clamped to a sensible range.
-                            let updated_timeout = ((updated_avg * 2.0) as u64).clamp(100, 10_000);
+                            let updated_timeout = ((updated_avg * 2.0) as u64).clamp(1, 10_000);
                             println!(
                                 "[server] ACK seq={} OK  rtt={:.1}ms  avg_rtt={:.1}ms  timeout={}ms",
                                 current_seq, rtt_ms, updated_avg, updated_timeout
